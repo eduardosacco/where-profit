@@ -1,0 +1,4 @@
+{
+  "query": "query pools($first: Int!, $skip:Int!) {\n\t\tpools(\n\t\t\tfirst: $first\n\t\t\tskip: $skip\n\t\t) {\n\t\t\tid\n\t\t\ttotalValueLockedUSD\n\t\t\tvolumeUSD\n\t\t\ttxCount\n\t\t\ttoken0 {\n\t\t\t\tname\n\t\t\t}\n\t\t\ttoken1 {\n\t\t\t\tname\n\t\t\t}\n\t\t}\n\t}",
+  "variables": "{\n    \"first\": 10,\n    \"skip\": 10\n\t}"
+}
