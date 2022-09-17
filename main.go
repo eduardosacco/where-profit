@@ -53,43 +53,40 @@ type poolDayDatas struct {
 	Token1Price  string
 	VolumeToken0 string
 	VolumeToken1 string
+	FeesUSD      string
 }
 
-const startDate = "2022-01-01"
-const endDate = "2022-02-28"
-
+// Use https://www.epochconverter.com/ to get epoch
+const startDate = 1640995200 //2022-01-01 12:00:00 AM
+const endDate = 1646092799   //2022-02-28 11:59:59 PM
 const subGraphUrl = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3"
 
 func main() {
-	const layout = "2006-01-02"
-	t1, _ := time.Parse(layout, startDate)
-	t2, _ := time.Parse(layout, endDate)
+	t1 := time.Unix(startDate, 0)
+	t2 := time.Unix(endDate, 0)
 	days := int(t2.Sub(t1).Hours() / 24)
 
-	fmt.Println("Calculating most liquid pool in a period of " + strconv.Itoa(days) + " days starting from " + startDate)
+	fmt.Println("Calculating most liquid pool in a period of", strconv.Itoa(days), "days starting from", t1.UTC())
 
-	pr := getLiquidityPools() // currently only using the 1000 most liquid pools
-	pools := pr.Data.Pools
-	// for _, p := range pools {
+	pools := getLiquidityPools()
 
-	// }
+	fmt.Println(pools[0]) // just testing
 
-	p0Id := pools[0].Id
-	fmt.Println(p0Id)
-	pddr := getLiquidityPoolDaysData("0x1d42064fc4beb5f8aaf85f4617ae8b3b5b8bd801", t1.Unix(), days)
+	pdd := getLiquidityPoolDaysData("0x1d42064fc4beb5f8aaf85f4617ae8b3b5b8bd801", t1.Unix(), days)
 
-	fmt.Println(pddr.Data.PoolDayDatas[0])
+	fmt.Println(pdd)
 
 }
 
-func getLiquidityPools() poolsResponse {
-	// refactor in order for pagination to be more performant than using skip
-	//https://thegraph.com/docs/en/querying/graphql-api/#example-using-and-2
-	query := `query pools($skip:Int!) {
+func getLiquidityPools() []pool {
+	//excluding pools that were created after the end date
+	query := `query pools($skip:Int!, $endDate: BigInt!) {
 		pools(
 			first: 1000
 			skip: $skip
-		) {
+			where: {
+				createdAtTimestamp_lt: $endDate
+		}) {
 			id
 			totalValueLockedUSD
 			volumeUSD
@@ -103,27 +100,40 @@ func getLiquidityPools() poolsResponse {
 		}
 	}`
 
-	variables := map[string]any{
-		"skip": 1000,
+	var pools []pool
+	var k = 0
+	for {
+		variables := map[string]any{
+			"skip":    k * 1000,
+			"endDate": endDate,
+		}
+
+		b := gqlRequest{Query: query, Variables: variables}
+		body, err := json.Marshal(b)
+
+		if err != nil {
+			fmt.Print(err.Error())
+			os.Exit(1)
+		}
+
+		responseData := queryTheGraph(body)
+		var pr *poolsResponse
+		err = json.Unmarshal(responseData, &pr)
+
+		if len(pr.Data.Pools) == 0 {
+			break
+		}
+
+		pools = append(pools, pr.Data.Pools...)
+		k++
 	}
 
-	b := gqlRequest{Query: query, Variables: variables}
-	body, err := json.Marshal(b)
-
-	if err != nil {
-		fmt.Print(err.Error())
-		os.Exit(1)
-	}
-
-	responseData := queryTheGraph(body)
-
-	var pr *poolsResponse
-	err = json.Unmarshal(responseData, &pr)
-
-	return *pr
+	return pools
 }
 
-func getLiquidityPoolDaysData(pool string, date int64, days int) poolDayDatasResponse {
+func getLiquidityPoolDaysData(pool string, date int64, days int) []poolDayDatas {
+	// returns daily aggregated data for the first $days days
+	// since the given &date timestamp for the $pool pool.
 	query := `query poolDayDatas($pool: String!, $date: Int!, $days: Int!) {
 		poolDayDatas(first: $days, orderBy: date, where: {
 			pool: $pool,
@@ -136,6 +146,7 @@ func getLiquidityPoolDaysData(pool string, date int64, days int) poolDayDatasRes
 			token1Price
 			volumeToken0
 			volumeToken1
+			feesUSD
 		}
 	}`
 
@@ -158,7 +169,7 @@ func getLiquidityPoolDaysData(pool string, date int64, days int) poolDayDatasRes
 	var pddr *poolDayDatasResponse
 	err = json.Unmarshal(responseData, &pddr)
 
-	return *pddr
+	return pddr.Data.PoolDayDatas
 }
 
 func queryTheGraph(body []byte) []byte {
