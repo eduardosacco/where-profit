@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -47,13 +48,19 @@ type poolDayDatasData struct {
 
 type poolDayDatas struct {
 	Date         int
-	Liquidity    string
+	Liquidity    float64 `json:",string"`
 	SqrtPrice    string
 	Token0Price  string
 	Token1Price  string
 	VolumeToken0 string
 	VolumeToken1 string
-	FeesUSD      string
+	FeesUSD      float64 `json:",string"`
+}
+
+type poolStats struct {
+	Id                     string
+	AverageProfitPerDollar float64
+	AverageAPR             float64
 }
 
 // Use https://www.epochconverter.com/ to get epoch
@@ -68,24 +75,38 @@ func main() {
 
 	fmt.Println("Calculating most liquid pool in a period of", strconv.Itoa(days), "days starting from", t1.UTC())
 
-	pools := getLiquidityPools()
+	pools := getLiquidityPools(t2.Unix())
 
 	fmt.Println(pools[0]) // just testing
 
-	pdd := getLiquidityPoolDaysData("0x1d42064fc4beb5f8aaf85f4617ae8b3b5b8bd801", t1.Unix(), days)
+	// TODO: Add go routines
+	var poolsStats []poolStats
+	for _, p := range pools {
+		pdd := getLiquidityPoolDaysData(p.Id, t1.Unix(), days)
+		profitPerDollar := calculatePoolStats(pdd)
+		poolsStats = append(poolsStats, poolStats{Id: p.Id, AverageProfitPerDollar: profitPerDollar})
+	}
 
-	fmt.Println(pdd)
+	sort.Slice(poolsStats, func(i, j int) bool {
+		return poolsStats[i].AverageProfitPerDollar > poolsStats[j].AverageProfitPerDollar
+	})
+
+	fmt.Println(poolsStats)
+	// pdd := getLiquidityPoolDaysData("0x1d42064fc4beb5f8aaf85f4617ae8b3b5b8bd801", t1.Unix(), days)
+	// fmt.Println(pdd)
 
 }
 
-func getLiquidityPools() []pool {
-	//excluding pools that were created after the end date
-	query := `query pools($skip:Int!, $endDate: BigInt!) {
+// Get all liquidity pools that were created before a limit date
+func getLiquidityPools(limitDate int64) []pool {
+	// excluding pools that were created after the limit date
+	// to avoid processing data we don't need for the problem
+	query := `query pools($skip:Int!, $limitDate: BigInt!) {
 		pools(
 			first: 1000
 			skip: $skip
 			where: {
-				createdAtTimestamp_lt: $endDate
+				createdAtTimestamp_lt: $limitDate
 		}) {
 			id
 			totalValueLockedUSD
@@ -104,8 +125,8 @@ func getLiquidityPools() []pool {
 	var k = 0
 	for {
 		variables := map[string]any{
-			"skip":    k * 1000,
-			"endDate": endDate,
+			"skip":      k * 1000,
+			"limitDate": limitDate,
 		}
 
 		b := gqlRequest{Query: query, Variables: variables}
@@ -126,6 +147,8 @@ func getLiquidityPools() []pool {
 
 		pools = append(pools, pr.Data.Pools...)
 		k++
+
+		break // TODO: REMOVE, this is for testing purposes only
 	}
 
 	return pools
@@ -187,4 +210,16 @@ func queryTheGraph(body []byte) []byte {
 	}
 
 	return responseData
+}
+
+// Will calculate only average values in the day span given
+// TODO: Add APR calculation
+func calculatePoolStats(pdds []poolDayDatas) float64 {
+	var profitPerDollar float64
+	for _, pdd := range pdds {
+		dayProfitPerDollar := pdd.FeesUSD / float64(pdd.Liquidity)
+		profitPerDollar = (profitPerDollar + dayProfitPerDollar) / 2
+	}
+
+	return profitPerDollar
 }
