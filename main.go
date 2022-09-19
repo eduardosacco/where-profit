@@ -26,7 +26,29 @@ type poolsData struct {
 }
 
 type token struct {
-	Name string
+	Id       string
+	Name     string
+	Symbol   string
+	Decimals string
+}
+
+type poolDayData struct {
+	Date         int
+	Liquidity    float64 `json:",string"`
+	SqrtPrice    string
+	Token0Price  string
+	Token1Price  string
+	VolumeToken0 string
+	VolumeToken1 string
+	FeesUSD      float64 `json:",string"`
+	TvlUSD       float64 `json:",string"`
+}
+
+type poolStats struct {
+	Id                     string
+	AverageProfitPerDollar float64
+	APR                    float64
+	DaysWithInfo           int
 }
 
 type pool struct {
@@ -36,87 +58,95 @@ type pool struct {
 	TxCount             string
 	Token0              token
 	Token1              token
-}
-
-type poolDayDatasResponse struct {
-	Data poolDayDatasData `json:"data"`
-}
-
-type poolDayDatasData struct {
-	PoolDayDatas []poolDayDatas
-}
-
-type poolDayDatas struct {
-	Date         int
-	Liquidity    float64 `json:",string"`
-	SqrtPrice    string
-	Token0Price  string
-	Token1Price  string
-	VolumeToken0 string
-	VolumeToken1 string
-	FeesUSD      float64 `json:",string"`
-}
-
-type poolStats struct {
-	Id                     string
-	AverageProfitPerDollar float64
-	AverageAPR             float64
+	PoolDayData         []poolDayData
+	Stats               poolStats
 }
 
 // Use https://www.epochconverter.com/ to get epoch
 const startDate = 1640995200 //2022-01-01 12:00:00 AM
 const endDate = 1646092799   //2022-02-28 11:59:59 PM
+
+// Minimum pool day data samples to exist in the given period in order for the pool stats to be taken into account
+const minimumDataSamplesPercentage = 0.5
+
+// Uniswap Subgraph URL
 const subGraphUrl = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3"
 
 func main() {
 	t1 := time.Unix(startDate, 0)
 	t2 := time.Unix(endDate, 0)
 	days := int(t2.Sub(t1).Hours() / 24)
+	minimumSamples := int(minimumDataSamplesPercentage * float64(days))
 
 	fmt.Println("Calculating most liquid pool in a period of", strconv.Itoa(days), "days starting from", t1.UTC())
+	fmt.Println("Disregarding pool with less than", minimumSamples, "day samples in for the period")
+	fmt.Println()
 
-	pools := getLiquidityPools(t2.Unix())
+	pools := getLiquidityPoolsWithDaysData(endDate, startDate, days)
 
-	fmt.Println(pools[0]) // just testing
-
-	// TODO: Add go routines
-	var poolsStats []poolStats
-	for _, p := range pools {
-		pdd := getLiquidityPoolDaysData(p.Id, t1.Unix(), days)
-		profitPerDollar := calculatePoolStats(pdd)
-		poolsStats = append(poolsStats, poolStats{Id: p.Id, AverageProfitPerDollar: profitPerDollar})
+	for k := 0; k < len(pools); k++ {
+		// Calculate stats only for pools with minimum specified samples of daily data
+		if len(pools[k].PoolDayData) > minimumSamples {
+			pools[k].Stats = calculatePoolStats(pools[k])
+		}
 	}
 
-	sort.Slice(poolsStats, func(i, j int) bool {
-		return poolsStats[i].AverageProfitPerDollar > poolsStats[j].AverageProfitPerDollar
+	// sort pools by per dollar profit descending
+	sort.Slice(pools, func(i, j int) bool {
+		return pools[i].Stats.AverageProfitPerDollar > pools[j].Stats.AverageProfitPerDollar
 	})
 
-	fmt.Println(poolsStats)
-	// pdd := getLiquidityPoolDaysData("0x1d42064fc4beb5f8aaf85f4617ae8b3b5b8bd801", t1.Unix(), days)
-	// fmt.Println(pdd)
+	fmt.Println("Top ten most profitable pools between", t1.UTC(), "and", t2.UTC())
+	fmt.Println()
 
+	for i := 0; i < 10; i++ {
+		fmt.Println(pools[i].Id, "\t", pools[i].Token0.Symbol, "/", pools[i].Token1.Symbol, "\t",
+			pools[i].Stats.AverageProfitPerDollar, "\t", pools[i].Stats.APR)
+	}
 }
 
-// Get all liquidity pools that were created before a limit date
-func getLiquidityPools(limitDate int64) []pool {
+// Get all liquidity pools that were created before a limit date including
+// daily aggregated data for the first $lpDayDataDays days
+// since the given &lpDayDataStartDate timestamp.
+func getLiquidityPoolsWithDaysData(lpCreationDateLimit int, lpDayDataStartDate int, lpDayDataDays int) []pool {
 	// excluding pools that were created after the limit date
 	// to avoid processing data we don't need for the problem
-	query := `query pools($skip:Int!, $limitDate: BigInt!) {
-		pools(
-			first: 1000
+	query := `query pools($first: Int!, $skip:Int!, $lpCreationDateLimit: BigInt!, $lpDayDataStartDate: Int!, $lpDayDataDays: Int!) {
+    pools(
+			first: $first
 			skip: $skip
 			where: {
-				createdAtTimestamp_lt: $limitDate
-		}) {
+				createdAtTimestamp_lt: $lpCreationDateLimit
+			}
+		) {
 			id
 			totalValueLockedUSD
 			volumeUSD
 			txCount
 			token0 {
+				id
 				name
+				symbol
+				decimals
 			}
 			token1 {
+				id
 				name
+				symbol
+				decimals
+			}
+			poolDayData(first: $lpDayDataDays, orderBy: date, where: {
+				date_gte: $lpDayDataStartDate
+			} ) {
+				date
+				liquidity
+				sqrtPrice
+				token0Price
+				token1Price
+				volumeToken0
+				volumeToken1
+				feesUSD
+				tvlUSD
 			}
 		}
 	}`
@@ -125,8 +155,11 @@ func getLiquidityPools(limitDate int64) []pool {
 	var k = 0
 	for {
 		variables := map[string]any{
-			"skip":      k * 1000,
-			"limitDate": limitDate,
+			"first":               1000,
+			"skip":                k * 1000,
+			"lpCreationDateLimit": lpCreationDateLimit,
+			"lpDayDataStartDate":  lpDayDataStartDate,
+			"lpDayDataDays":       lpDayDataDays,
 		}
 
 		b := gqlRequest{Query: query, Variables: variables}
@@ -137,9 +170,14 @@ func getLiquidityPools(limitDate int64) []pool {
 			os.Exit(1)
 		}
 
-		responseData := queryTheGraph(body)
+		responseData := queryUniswapSubGraph(body)
 		var pr *poolsResponse
 		err = json.Unmarshal(responseData, &pr)
+
+		if err != nil {
+			fmt.Print(err.Error())
+			os.Exit(1)
+		}
 
 		if len(pr.Data.Pools) == 0 {
 			break
@@ -147,55 +185,13 @@ func getLiquidityPools(limitDate int64) []pool {
 
 		pools = append(pools, pr.Data.Pools...)
 		k++
-
-		break // TODO: REMOVE, this is for testing purposes only
 	}
 
 	return pools
 }
 
-func getLiquidityPoolDaysData(pool string, date int64, days int) []poolDayDatas {
-	// returns daily aggregated data for the first $days days
-	// since the given &date timestamp for the $pool pool.
-	query := `query poolDayDatas($pool: String!, $date: Int!, $days: Int!) {
-		poolDayDatas(first: $days, orderBy: date, where: {
-			pool: $pool,
-			date_gt: $date
-		} ) {
-			date
-			liquidity
-			sqrtPrice
-			token0Price
-			token1Price
-			volumeToken0
-			volumeToken1
-			feesUSD
-		}
-	}`
-
-	variables := map[string]any{
-		"pool": pool,
-		"date": date,
-		"days": days,
-	}
-
-	b := gqlRequest{Query: query, Variables: variables}
-	body, err := json.Marshal(b)
-
-	if err != nil {
-		fmt.Print(err.Error())
-		os.Exit(1)
-	}
-
-	responseData := queryTheGraph(body)
-
-	var pddr *poolDayDatasResponse
-	err = json.Unmarshal(responseData, &pddr)
-
-	return pddr.Data.PoolDayDatas
-}
-
-func queryTheGraph(body []byte) []byte {
+// Send a GraphQl query to the Uniswap subgraph and return the raw response
+func queryUniswapSubGraph(body []byte) []byte {
 	response, err := http.Post(subGraphUrl, "application/json", bytes.NewBuffer(body))
 
 	if err != nil {
@@ -212,14 +208,19 @@ func queryTheGraph(body []byte) []byte {
 	return responseData
 }
 
-// Will calculate only average values in the day span given
-// TODO: Add APR calculation
-func calculatePoolStats(pdds []poolDayDatas) float64 {
-	var profitPerDollar float64
-	for _, pdd := range pdds {
-		dayProfitPerDollar := pdd.FeesUSD / float64(pdd.Liquidity)
-		profitPerDollar = (profitPerDollar + dayProfitPerDollar) / 2
+// Calculate average daily profit per dollar and APR in the given days span
+func calculatePoolStats(p pool) poolStats {
+	totalDays := len(p.PoolDayData)
+	var sumProfitPerDollar float64
+	for _, pdd := range p.PoolDayData {
+		dayProfitPerDollar := pdd.FeesUSD / pdd.TvlUSD
+		sumProfitPerDollar += dayProfitPerDollar
 	}
 
-	return profitPerDollar
+	avgProfitPerDollar := sumProfitPerDollar / float64(totalDays)
+
+	// uniswap v3 does not have compound interest
+	apr := (avgProfitPerDollar) / float64(totalDays) * 365 * 100
+
+	return poolStats{Id: p.Id, AverageProfitPerDollar: avgProfitPerDollar, APR: apr, DaysWithInfo: totalDays}
 }
